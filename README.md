@@ -76,4 +76,131 @@ Your work will be automatically submitted when you push to your GitHub Classroom
 - [Express.js Documentation](https://expressjs.com/)
 - [React Documentation](https://react.dev/)
 - [Node.js Documentation](https://nodejs.org/en/docs/)
-- [Mongoose Documentation](https://mongoosejs.com/docs/) 
+- [Mongoose Documentation](https://mongoosejs.com/docs/)
+
+
+// index.js (run with: node index.js)
+import express from 'express';
+import mongoose from 'mongoose';
+import cors from 'cors';
+import cookieParser from 'cookie-parser';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import multer from 'multer';
+import path from 'path';
+import fs from 'fs';
+import { createServer } from 'http';
+import { readFileSync } from 'fs';
+
+const app = express();
+const PORT = 5000;
+const JWT_SECRET = 'supersecret';
+const UPLOAD_DIR = './uploads';
+
+mongoose.connect('mongodb://127.0.0.1:27017/mini_blog');
+
+app.use(cors({ origin: 'http://localhost:5173', credentials: true }));
+app.use(express.json());
+app.use(cookieParser());
+app.use('/uploads', express.static(UPLOAD_DIR));
+
+// Models
+const userSchema = new mongoose.Schema({
+  name: String,
+  email: { type: String, unique: true },
+  password: String,
+  role: { type: String, default: 'user' }
+});
+userSchema.pre('save', async function () {
+  this.password = await bcrypt.hash(this.password, 10);
+});
+userSchema.methods.matchPassword = function (pw) {
+  return bcrypt.compare(pw, this.password);
+};
+const User = mongoose.model('User', userSchema);
+
+const postSchema = new mongoose.Schema({
+  title: String,
+  body: String,
+  slug: String,
+  coverImageUrl: String,
+  author: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }
+});
+const Post = mongoose.model('Post', postSchema);
+
+const commentSchema = new mongoose.Schema({
+  body: String,
+  post: { type: mongoose.Schema.Types.ObjectId, ref: 'Post' },
+  author: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }
+});
+const Comment = mongoose.model('Comment', commentSchema);
+
+// Middleware
+const auth = async (req, res, next) => {
+  const token = req.cookies.token;
+  if (!token) return res.status(401).json({ message: 'No token' });
+  const decoded = jwt.verify(token, JWT_SECRET);
+  req.user = await User.findById(decoded.id);
+  next();
+};
+
+// Upload
+if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR);
+const storage = multer.diskStorage({
+  destination: (_, __, cb) => cb(null, UPLOAD_DIR),
+  filename: (_, file, cb) => cb(null, Date.now() + path.extname(file.originalname))
+});
+const upload = multer({ storage });
+
+// Auth routes
+app.post('/api/register', async (req, res) => {
+  const user = await User.create(req.body);
+  res.json(user);
+});
+app.post('/api/login', async (req, res) => {
+  const user = await User.findOne({ email: req.body.email });
+  if (!user || !(await user.matchPassword(req.body.password)))
+    return res.status(401).json({ message: 'Invalid credentials' });
+  const token = jwt.sign({ id: user._id }, JWT_SECRET);
+  res.cookie('token', token, { httpOnly: true }).json(user);
+});
+app.get('/api/me', auth, (req, res) => res.json(req.user));
+
+// Post routes
+app.get('/api/posts', async (req, res) => {
+  const posts = await Post.find().populate('author', 'name');
+  res.json(posts);
+});
+app.post('/api/posts', auth, async (req, res) => {
+  const post = await Post.create({ ...req.body, author: req.user._id });
+  res.json(post);
+});
+
+// Comment routes
+app.get('/api/comments/:postId', async (req, res) => {
+  const comments = await Comment.find({ post: req.params.postId }).populate('author', 'name');
+  res.json(comments);
+});
+app.post('/api/comments/:postId', auth, async (req, res) => {
+  const comment = await Comment.create({ body: req.body.body, post: req.params.postId, author: req.user._id });
+  res.json(comment);
+});
+
+// Upload route
+app.post('/api/upload', auth, upload.single('image'), (req, res) => {
+  res.json({ url: `/uploads/${req.file.filename}` });
+});
+
+// Minimal frontend (optional)
+app.get('/', (_, res) => {
+  res.send(`
+    <html>
+      <body>
+        <h1>MERN Blog</h1>
+        <p>Use Postman or connect React frontend to /api endpoints.</p>
+      </body>
+    </html>
+  `);
+});
+
+app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
